@@ -1,0 +1,80 @@
+name: Cloud Blender - Procedural Creature
+
+on:
+  push:
+    branches:
+      - blender-cloud-test
+    paths:
+      - ".github/workflows/blender-cloud.yml"
+      - "tools/cloud_blender/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-model:
+    name: Build game-ready GLB and Blender project
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install headless graphics dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth libgl1 libxrender1 libxi6 libxkbcommon0 \
+            libxxf86vm1 libsm6 libice6 libegl1 libopengl0
+
+      - name: Download official Blender 4.5.14 LTS
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output /tmp/blender-linux.tar.xz \
+            https://download.blender.org/release/Blender4.5/blender-4.5.14-linux-x64.tar.xz
+          mkdir -p /tmp/blender-install
+          tar -xJf /tmp/blender-linux.tar.xz -C /tmp/blender-install
+          BLENDER_EXE="$(find /tmp/blender-install -maxdepth 3 -type f -name blender -print -quit)"
+          test -n "$BLENDER_EXE"
+          echo "BLENDER_EXE=$BLENDER_EXE" >> "$GITHUB_ENV"
+          "$BLENDER_EXE" --version | head -n 2
+
+      - name: Run modeling and preview in virtual display
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          MESA_GL_VERSION_OVERRIDE: "4.3"
+        run: |
+          set -euo pipefail
+          xvfb-run -a -s "-screen 0 1280x1024x24" \
+            "$BLENDER_EXE" --background --threads 2 \
+            --python tools/cloud_blender/create_test_creature.py
+
+      - name: Verify Blender output signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s outputs/runner_prototype.glb
+          test -s outputs/runner_prototype.blend
+          test -s outputs/runner_prototype_info.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          glb = Path("outputs/runner_prototype.glb").read_bytes()
+          assert glb[:4] == b"glTF", "Invalid glTF binary header"
+          d = json.loads(Path("outputs/runner_prototype_info.json").read_text())
+          assert d["eye_count"] == 4 and d["leg_count"] == 4, d
+          print("EXPORTS_VALIDATED", d)
+          PY
+
+      - name: Upload GLB, Blender scene and optional PNG
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-blender-runner-prototype
+          path: outputs/
+          if-no-files-found: warn
+          retention-days: 7
